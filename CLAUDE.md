@@ -247,6 +247,7 @@ Handlers emit `{"error": "..."}` via `s.writeError(w, status, msg)`. Status conv
 - **403** RBAC denied (nil lister or apiserver Forbidden)
 - **404** resource doesn't exist — check via `apierrors.IsNotFound(err)`
 - **409** operation already in progress (sync running, etc.)
+- **413** request body over the route's cap — the body is bounded *before* it is read (`readBoundedTextBody` for raw YAML, `decodeBoundedJSONBody` for JSON), so nothing has parsed it yet and 400 would wrongly blame the content. Reserve 400 for input that was read and found invalid — including caps counted after parsing, like the YAML document limit
 - **503** cache/connection not ready — most cluster-touching handlers call `s.requireConnected(w)` at the top
 - **500** unexpected — always `log.Printf("[module] Failed to <action> %s/%s: %v", ns, name, err)` before returning
 

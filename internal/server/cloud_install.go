@@ -70,16 +70,20 @@ const (
 	cloudFlowFailed           = "failed"
 )
 
+// Failure kinds read as a sentence fragment on their own: they travel into
+// the browser-wizard link the user opens next, where the person sees them in
+// the address bar with no other context.
 const (
-	cloudFailConnect           = "connect_failed"
-	cloudFailRejected          = "rejected"
-	cloudFailExpired           = "expired"
-	cloudFailPickupExpired     = "pickup_expired"
-	cloudFailApprovalUnknown   = "approval_unknown"
-	cloudFailCanceled          = "canceled"
+	cloudFailConnectRequest    = "hub_connect_request_failed"
+	cloudFailApprovalPoll      = "hub_approval_poll_failed"
+	cloudFailRejected          = "approval_rejected_in_browser"
+	cloudFailExpired           = "approval_window_expired"
+	cloudFailPickupExpired     = "approved_but_credential_pickup_expired"
+	cloudFailApprovalUnknown   = "approval_outcome_unknown"
+	cloudFailCanceled          = "canceled_before_approval_page"
 	cloudFailCanceledApproved  = "canceled_after_approval"
-	cloudFailProvision         = "provision_failed"
-	cloudFailTunnelUnconfirmed = "tunnel_unconfirmed"
+	cloudFailProvision         = "helm_provision_failed"
+	cloudFailTunnelUnconfirmed = "installed_but_tunnel_not_confirmed"
 )
 
 const (
@@ -342,6 +346,47 @@ func (m *cloudInstallManager) prepare(ctx context.Context) (*cloudInstallFlow, *
 
 var errFlowActive = errors.New("a Cloud connection flow is already in progress")
 
+// connectRequestFailure turns a failed connect-request creation into a
+// failure the card can show: a headline that says what happened in words,
+// the raw error kept as inspectable detail. Nothing exists at the Hub yet in
+// any of these cases, so starting over is always safe.
+func connectRequestFailure(err error) *cloudInstallFailure {
+	var unreachable *cloud.HubUnreachableError
+	switch {
+	case errors.As(err, &unreachable):
+		return &cloudInstallFailure{
+			Kind:    cloudFailConnectRequest,
+			Message: "Radar couldn't reach Radar Hub, so no connection was requested.",
+			Guidance: &cloudinstall.RecoveryGuidance{
+				Summary: fmt.Sprintf("Check that this machine can reach %s (VPN, proxy, firewall), then start over.", unreachable.HubBase),
+				Inspect: []string{err.Error()},
+			},
+			RetrySafe: true,
+		}
+	default:
+		if status, declined := cloud.HubDeclinedStatus(err); declined {
+			return &cloudInstallFailure{
+				Kind:    cloudFailConnectRequest,
+				Message: fmt.Sprintf("Radar Hub declined the connection request (HTTP %d).", status),
+				Guidance: &cloudinstall.RecoveryGuidance{
+					Summary: "Nothing was created. If this keeps happening, the Hub's response below says why.",
+					Inspect: []string{err.Error()},
+				},
+				RetrySafe: true,
+			}
+		}
+		return &cloudInstallFailure{
+			Kind:    cloudFailConnectRequest,
+			Message: "Radar couldn't start the connection request.",
+			Guidance: &cloudinstall.RecoveryGuidance{
+				Summary: "Nothing was created; it is safe to start over.",
+				Inspect: []string{err.Error()},
+			},
+			RetrySafe: true,
+		}
+	}
+}
+
 func (m *cloudInstallManager) runPrepare(ctx context.Context, flow *cloudInstallFlow) (*cloudInstallBlocked, error) {
 	clients, contextName, err := m.backend.captureClients()
 	if err != nil {
@@ -502,11 +547,7 @@ func (m *cloudInstallManager) start(req cloudInstallStartRequest) (*cloudInstall
 	}
 	if err != nil {
 		flow.state = cloudFlowFailed
-		flow.failure = &cloudInstallFailure{
-			Kind:      cloudFailConnect,
-			Message:   fmt.Sprintf("couldn't start the connect flow: %v", err),
-			RetrySafe: true,
-		}
+		flow.failure = connectRequestFailure(err)
 		return flow, nil
 	}
 
@@ -580,8 +621,9 @@ func (m *cloudInstallManager) run(ctx context.Context, flow *cloudInstallFlow, c
 				ClusterURL: clustersURL,
 			}, false)
 		default:
-			fail(cloudFailConnect, fmt.Sprintf("connect failed: %v", err), &cloudinstall.RecoveryGuidance{
-				Summary:    "Check the clusters list before retrying:",
+			fail(cloudFailApprovalPoll, "Radar lost track of the connection request while waiting for approval.", &cloudinstall.RecoveryGuidance{
+				Summary:    "An approval may have gone through. Check the clusters list before starting over:",
+				Inspect:    []string{err.Error()},
 				ClusterURL: clustersURL,
 			}, false)
 		}

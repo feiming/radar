@@ -357,7 +357,7 @@ func TestCloudInstallApprovalTerminalOutcomes(t *testing.T) {
 		{"rejected", cloud.ErrConnectRejected, cloudFailRejected, true},
 		{"pickup expired", cloud.ErrConnectPickupExpired, cloudFailPickupExpired, false},
 		{"recovery timeout is ambiguous", cloud.ErrConnectRecoveryTimeout, cloudFailApprovalUnknown, false},
-		{"transport", errors.New("hub returned 502"), cloudFailConnect, false},
+		{"transport", errors.New("hub returned 502"), cloudFailApprovalPoll, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -936,5 +936,35 @@ func TestCloudInstallProvisionErrorNeverLeaksTokenIntoStatus(t *testing.T) {
 	}
 	if got := logs.String(); strings.Contains(got, testToken) || strings.Contains(got, encoded) {
 		t.Fatalf("server log leaks the token: %s", got)
+	}
+}
+
+func TestConnectRequestFailureHeadlines(t *testing.T) {
+	dial := errors.New("dial tcp 127.0.0.1:9: connect: connection refused")
+	cases := []struct {
+		name        string
+		err         error
+		wantMessage string
+	}{
+		{"unreachable", &cloud.HubUnreachableError{HubBase: "http://127.0.0.1:9", Err: dial}, "Radar couldn't reach Radar Hub, so no connection was requested."},
+		{"other", errors.New("hub response missing required fields"), "Radar couldn't start the connection request."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := connectRequestFailure(tc.err)
+			if f.Kind != cloudFailConnectRequest || !f.RetrySafe {
+				t.Fatalf("kind/retrySafe = %q/%v", f.Kind, f.RetrySafe)
+			}
+			if f.Message != tc.wantMessage {
+				t.Fatalf("message = %q, want %q", f.Message, tc.wantMessage)
+			}
+			// The raw error is detail, never the headline.
+			if strings.Contains(f.Message, tc.err.Error()) {
+				t.Fatalf("headline carries the raw error: %q", f.Message)
+			}
+			if f.Guidance == nil || len(f.Guidance.Inspect) != 1 || f.Guidance.Inspect[0] != tc.err.Error() {
+				t.Fatalf("guidance.inspect = %+v, want the raw error", f.Guidance)
+			}
+		})
 	}
 }
