@@ -15,7 +15,7 @@ import (
 	"github.com/skyhook-io/radar/internal/k8s"
 )
 
-// shellEnvVars lists environment variables to capture from the user's
+// shellEnvVars lists exact environment variables to capture from the user's
 // login shell. GUI apps (macOS .app, Linux .desktop) inherit a minimal
 // environment that lacks these, causing silent failures when tools or
 // configs set in .zshrc/.bashrc are not available.
@@ -24,6 +24,7 @@ var shellEnvVars = []string{
 	"KUBECONFIG",
 	"AWS_PROFILE",
 	"AWS_DEFAULT_REGION",
+	"AWS_REGION",
 	"GOOGLE_APPLICATION_CREDENTIALS",
 	"CLOUDSDK_CONFIG",
 	"AZURE_CONFIG_DIR",
@@ -33,12 +34,19 @@ var shellEnvVars = []string{
 	"RADAR_HUB_APP_URL",
 }
 
+// shellEnvPrefixes lists env var prefixes to capture wholesale. All vars
+// matching any prefix are forwarded to the desktop app's environment.
+var shellEnvPrefixes = []string{
+	"ANTHROPIC_",
+	"CLAUDE_CODE_",
+}
+
 // enrichEnv captures key environment variables from the user's login
 // shell so the desktop app can find CLI tools and config files that are
 // set in .zshrc/.bashrc but not available to macOS .app bundles or
 // Linux desktop applications.
 func enrichEnv() {
-	captured := getShellEnv(shellEnvVars)
+	captured := getShellEnv(shellEnvVars, shellEnvPrefixes)
 
 	if path, ok := captured["PATH"]; ok && path != "" {
 		os.Setenv("PATH", path)
@@ -55,53 +63,43 @@ func enrichEnv() {
 		}
 	}
 
-	// Apply non-PATH vars that were found in the shell but not in our env
-	for _, key := range shellEnvVars {
+	// Apply all captured vars (except PATH, handled above) that are not
+	// already set in the process environment.
+	for key, val := range captured {
 		if key == "PATH" {
 			continue
 		}
-		val, found := captured[key]
-		if found && val != "" && os.Getenv(key) == "" {
+		if val != "" && os.Getenv(key) == "" {
 			os.Setenv(key, val)
 			log.Printf("Env enriched: %s from login shell", key)
 			if key == "KUBECONFIG" {
 				k8s.SetEnrichedKubeconfigFromShell(true)
 			}
-			continue
 		}
-		// Explain KUBECONFIG skip reasons — the GUI app starts with a stripped
-		// env on macOS/Linux, and if enrichment doesn't fire the user may see
-		// fewer clusters than they expect in the switcher. We surface this via
-		// the errorlog so it shows up in bug report diagnostics.
-		if key != "KUBECONFIG" {
-			continue
+	}
+
+	// Explain KUBECONFIG skip reasons — the GUI app starts with a stripped
+	// env on macOS/Linux, and if enrichment doesn't fire the user may see
+	// fewer clusters than they expect in the switcher. We surface this via
+	// the errorlog so it shows up in bug report diagnostics.
+	kubeconfigVal, kubeconfigFound := captured["KUBECONFIG"]
+	switch {
+	case os.Getenv("KUBECONFIG") != "" && !(kubeconfigFound && kubeconfigVal != ""):
+		existing := os.Getenv("KUBECONFIG")
+		pathCount := len(filepath.SplitList(existing))
+		log.Printf("KUBECONFIG enrichment skipped: already set in process env (%d path(s))", pathCount)
+		errorlog.Record("env-enrich", "warning",
+			"KUBECONFIG enrichment skipped: already set in process env with %d path(s); "+
+				"login shell value ignored", pathCount)
+	case !kubeconfigFound || kubeconfigVal == "":
+		shellName := "unknown"
+		if s := os.Getenv("SHELL"); s != "" {
+			shellName = filepath.Base(s)
 		}
-		switch {
-		case os.Getenv(key) != "":
-			// Pre-existing KUBECONFIG in the process env blocks enrichment.
-			// Most likely cause: launchctl setenv or a parent shell that
-			// already exported a (possibly shorter) value.
-			existing := os.Getenv(key)
-			pathCount := len(filepath.SplitList(existing))
-			log.Printf("KUBECONFIG enrichment skipped: already set in process env (%d path(s))", pathCount)
-			errorlog.Record("env-enrich", "warning",
-				"KUBECONFIG enrichment skipped: already set in process env with %d path(s); "+
-					"login shell value ignored", pathCount)
-		case !found || val == "":
-			// Use Base() so a user with a custom shell binary under $HOME
-			// (e.g. nix-profile) doesn't leak their username into a public
-			// bug report. Fall back to a placeholder when $SHELL is unset
-			// — filepath.Base("") returns "." which would be a confusing
-			// diagnostic message.
-			shellName := "unknown"
-			if s := os.Getenv("SHELL"); s != "" {
-				shellName = filepath.Base(s)
-			}
-			log.Printf("KUBECONFIG enrichment skipped: not found in login shell")
-			errorlog.Record("env-enrich", "warning",
-				"KUBECONFIG not found in login shell (%s -l -i); "+
-					"multi-file configs from .zshrc/.bashrc will not be visible", shellName)
-		}
+		log.Printf("KUBECONFIG enrichment skipped: not found in login shell")
+		errorlog.Record("env-enrich", "warning",
+			"KUBECONFIG not found in login shell (%s -l -i); "+
+				"multi-file configs from .zshrc/.bashrc will not be visible", shellName)
 	}
 }
 
@@ -109,9 +107,9 @@ func enrichEnv() {
 // It uses -i (interactive) so that zsh reads ~/.zshrc, where tools like
 // Homebrew's google-cloud-sdk add their PATH/KUBECONFIG entries. Without -i,
 // a non-interactive login shell skips ~/.zshrc.
-// Output markers safely extract values even if the interactive shell
-// prints extra text (e.g. Oh My Zsh banners, motd).
-func getShellEnv(keys []string) map[string]string {
+// Output is KEY=VALUE lines between markers; prefix entries capture all
+// matching vars wholesale (e.g. "ANTHROPIC_" captures every ANTHROPIC_* var).
+func getShellEnv(keys []string, prefixes []string) map[string]string {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		if runtime.GOOS == "darwin" {
@@ -121,16 +119,20 @@ func getShellEnv(keys []string) map[string]string {
 		}
 	}
 
-	// Print each var on its own line between markers so values containing
-	// special strings don't break parsing. Using printf '%s\n' per var.
+	// Build a grep -E pattern matching exact keys (KEY=) and prefix wildcards.
+	var patterns []string
+	for _, k := range keys {
+		patterns = append(patterns, k+"=")
+	}
+	for _, p := range prefixes {
+		patterns = append(patterns, p)
+	}
+	grepPattern := "^(" + strings.Join(patterns, "|") + ")"
+
 	const startMarker = "__RADAR_ENV_START__"
 	const endMarker = "__RADAR_ENV_END__"
 
-	var printCmds []string
-	for _, key := range keys {
-		printCmds = append(printCmds, "printf '%s\\n' \"$"+key+"\"")
-	}
-	echoCmd := "echo " + startMarker + "; " + strings.Join(printCmds, "; ") + "; echo " + endMarker
+	echoCmd := "echo " + startMarker + "; env | grep -E '" + grepPattern + "'; echo " + endMarker
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -155,21 +157,17 @@ func getShellEnv(keys []string) map[string]string {
 		log.Printf("Shell env detection: markers not found in output")
 		return nil
 	}
-	// Payload is: \nVAL1\nVAL2\n...\nVALn\n (empty vars produce empty lines).
-	// Split on \n gives ["", val1, val2, ..., valn, ""] — trim first and last.
-	payload := output[startIdx+len(startMarker) : endIdx]
-	lines := strings.Split(payload, "\n")
-	if len(lines) >= 2 {
-		lines = lines[1 : len(lines)-1] // drop leading "" from echo newline and trailing ""
-	}
-	if len(lines) != len(keys) {
-		log.Printf("Shell env detection: expected %d values, got %d", len(keys), len(lines))
-		return nil
-	}
 
-	result := make(map[string]string, len(keys))
-	for i, key := range keys {
-		result[key] = lines[i]
+	payload := output[startIdx+len(startMarker) : endIdx]
+	result := make(map[string]string)
+	for _, line := range strings.Split(payload, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if idx := strings.IndexByte(line, '='); idx >= 0 {
+			result[line[:idx]] = line[idx+1:]
+		}
 	}
 	return result
 }
