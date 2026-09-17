@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent as ReactDragEvent } from 'react'
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Loader2, Upload, X } from 'lucide-react'
+import { AlertTriangle, Check, Loader2, Upload, X } from 'lucide-react'
+import { Collapse, CollapseChevron, useDisclosure } from '../ui/Collapse'
 import { ConfirmDialog } from '../ui/ConfirmDialog'
 import { DialogPortal } from '../ui/DialogPortal'
 import { YamlEditor, type YamlSchemaLoader } from '../ui/YamlEditor'
@@ -588,6 +589,7 @@ export function CreateResourceDialog({
 
 function ApplyErrorBanner({ error }: { error: string }) {
   const [expanded, setExpanded] = useState(false)
+  const { panelId, buttonProps } = useDisclosure(expanded)
   const parsed = formatApplyError(error)
   const hasFriendly = Boolean(parsed.suggestion)
   return (
@@ -603,19 +605,20 @@ function ApplyErrorBanner({ error }: { error: string }) {
       </div>
       {hasFriendly && (
         <button
+          {...buttonProps}
           type="button"
           onClick={() => setExpanded((value) => !value)}
           className="flex items-center gap-1 px-3 pb-2 text-red-500/60 hover:text-red-500/80 dark:text-red-400/60 dark:hover:text-red-400/80"
         >
-          {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          <CollapseChevron open={expanded} inheritColor className="h-3 w-3" />
           Details
         </button>
       )}
-      {expanded && hasFriendly && (
+      <Collapse open={expanded && hasFriendly} id={panelId}>
         <div className="break-all px-3 pb-2 font-mono leading-relaxed text-red-500/60 dark:text-red-400/60">
           {parsed.raw}
         </div>
-      )}
+      </Collapse>
     </div>
   )
 }

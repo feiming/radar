@@ -1,6 +1,7 @@
 import { useLayoutEffect, useId, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { ExternalLink, X } from 'lucide-react'
+import { Disclosure } from '../ui/Disclosure'
 import type { WorkloadMetrics } from '../../api/workloadMetrics'
 import type { PrometheusTimeRange } from '../../api/client'
 
@@ -124,8 +125,7 @@ export function WorkloadMetricsHelpContent({ data, pending, error }: Pick<Props,
         <div><dt className="font-medium text-theme-text-primary">Resource usage</dt><dd className="mt-1">CPU and memory include reporting containers and sidecars. Their historical charts show the workload total and maximum Pod; current-Pod charts show individual Pods. Throttling measures CFS periods, not CPU time lost.</dd></div>
       </dl>
     </section>
-    <details className="border-t border-theme-border pt-4">
-      <summary className="cursor-pointer font-medium text-theme-text-primary">Troubleshooting identity matching</summary>
+    <Disclosure className="border-t border-theme-border pt-4" summaryClassName="font-medium text-theme-text-primary" chevronClassName="h-4 w-4" summary="Troubleshooting identity matching">
       <div className="mt-3 space-y-3">
         <p>Check the affected chart’s warning first. Scope overrides address cluster identity; they do not add missing metrics, instrumentation or ownership history.</p>
         <p>If automatic matching cannot establish identity, an operator can explicitly assert the backend’s scope:</p>
@@ -140,6 +140,6 @@ export function WorkloadMetricsHelpContent({ data, pending, error }: Pick<Props,
         <p><strong className="font-medium">Desktop:</strong> automatic matching works without flags. Desktop does not expose these overrides yet; if one is required, use the standalone CLI with a verified scope.</p>
         <p><strong className="font-medium">Multiple Beyla observation jobs:</strong> workload charts currently honor <code className="font-mono text-xs">--beyla-job-selector</code> only alongside a verified scope override. Use one matcher, such as <code className="font-mono text-xs">{'\'job="primary-beyla"\''}</code>; Helm uses <code className="font-mono text-xs">traffic.beylaJobSelector</code>. A custom job name alone normally needs no override.</p>
       </div>
-    </details>
+    </Disclosure>
   </div>
 }

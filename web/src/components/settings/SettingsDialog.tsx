@@ -9,7 +9,7 @@ import {
 import { clsx } from 'clsx'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAnimatedUnmount } from '../../hooks/useAnimatedUnmount'
-import { TRANSITION_BACKDROP, TRANSITION_PANEL } from '../../utils/animation'
+import { TRANSITION_BACKDROP, TRANSITION_PANEL, overlayExitMs, overlayTransitionStyle } from '../../utils/animation'
 import { apiUrl, getAuthHeaders, getCredentialsMode, routePath } from '../../api/config'
 import {
   useCloudRole, useVersionCheck, useClusterInfo, usePrometheusStatus, useArgoStatus, useCapabilities,
@@ -135,7 +135,7 @@ export function SettingsDialog({
 }: SettingsDialogProps) {
   const queryClient = useQueryClient()
   const dialogRef = useRef<HTMLDivElement>(null)
-  const { shouldRender, isOpen } = useAnimatedUnmount(open, 200)
+  const { shouldRender, isOpen } = useAnimatedUnmount(open, overlayExitMs('dialog'))
   const { data: versionInfo } = useVersionCheck()
   // Radar configuration (kubeconfig, port, integrations…) is host-level and
   // affects every user of this instance, so it's gated to owners. Personal
@@ -473,6 +473,7 @@ export function SettingsDialog({
           TRANSITION_BACKDROP,
           isOpen ? 'opacity-100' : 'opacity-0'
         )}
+        style={overlayTransitionStyle(isOpen, 'dialog')}
         onClick={() => requestCloseRef.current()}
       />
 
@@ -499,6 +500,7 @@ export function SettingsDialog({
           TRANSITION_PANEL,
           isOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-95'
         )}
+        style={overlayTransitionStyle(isOpen, 'dialog')}
       >
         {/* Header — spans both panes */}
         <div className="flex items-center justify-between p-4 border-b border-theme-border shrink-0">

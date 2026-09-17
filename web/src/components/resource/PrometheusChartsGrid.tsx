@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Loader2, Wifi, WifiOff } from "lucide-react";
+import { Disclosure } from "../ui/Disclosure";
 import {
   AreaChart,
   SeriesLegend,
@@ -213,10 +214,9 @@ export function PrometheusChartsGrid({
 
       <div className="metrics-layout min-w-0 px-4 pt-4">
         {isWorkload && <h3 className="mb-2 text-sm font-semibold text-theme-text-primary">Network and storage</h3>}
-        {isWorkload && <details className="mb-2 text-xs text-theme-text-secondary">
-          <summary className="cursor-pointer">Pod-name matched · identity unverified</summary>
+        {isWorkload && <Disclosure className="mb-2 text-xs text-theme-text-secondary" summary="Pod-name matched · identity unverified">
           <p className="mt-2 max-w-2xl text-sm leading-relaxed">These charts match current Pod names, independently of the identity-checked charts above. Matching names in a shared backend may include another cluster.</p>
-        </details>}
+        </Disclosure>}
         <div className="metrics-chart-grid">
           {chartPanels.filter(({ def }) => !isWorkload || (def.key !== "cpu" && def.key !== "memory")).map(renderPanel)}
         </div>

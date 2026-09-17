@@ -1,7 +1,8 @@
-import { useState } from 'react'
-import { ChevronDown, ChevronRight, Box } from 'lucide-react'
+import { useState, useId } from 'react'
+import { Box } from 'lucide-react'
 import { clsx } from 'clsx'
 import { formatAge } from '../../resource-utils'
+import { Collapse, CollapseChevron, disclosurePanelId } from '../../../ui/Collapse'
 import { revisionRoleBadges } from '../../../shared/ResourceActionsBar'
 import type { WorkloadRevision, WorkloadPodInfo } from '../../../../types'
 
@@ -38,6 +39,9 @@ function podToneClass(pod: WorkloadPodInfo): string {
 // to that dialog — this is purely informational.
 export function ReplicaSetProgression({ revisions, pods, namespace, onNavigate }: ReplicaSetProgressionProps) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  // Revision rows are mapped inline, so they can't each call useDisclosure;
+  // one generated prefix plus the revision number keeps aria-controls unique.
+  const panelBase = useId()
 
   const podsByHash = new Map<string, WorkloadPodInfo[]>()
   for (const pod of pods ?? []) {
@@ -59,17 +63,20 @@ export function ReplicaSetProgression({ revisions, pods, namespace, onNavigate }
     <div className="space-y-1">
       {revisions.map((rev) => {
         const revPods = rev.podHash ? podsByHash.get(rev.podHash) ?? [] : []
-        const isOpen = expanded.has(rev.number)
+        // One predicate for header, caret and panel: no pods, nothing to open.
+        const isOpen = expanded.has(rev.number) && revPods.length > 0
         return (
           <div key={rev.number} className="rounded border border-theme-border/50">
             <button
               type="button"
+              aria-expanded={isOpen}
+              aria-controls={disclosurePanelId(panelBase, rev.number)}
               onClick={() => toggle(rev.number)}
               className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-theme-hover"
               disabled={revPods.length === 0}
             >
               {revPods.length > 0 ? (
-                isOpen ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-theme-text-tertiary" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-theme-text-tertiary" />
+                <CollapseChevron open={isOpen} className="h-3.5 w-3.5" />
               ) : (
                 <span className="w-3.5 shrink-0" />
               )}
@@ -85,7 +92,7 @@ export function ReplicaSetProgression({ revisions, pods, namespace, onNavigate }
               <span className="shrink-0 text-xs tabular-nums text-theme-text-tertiary">{rev.replicas ?? 0} replicas</span>
               <span className="shrink-0 text-xs text-theme-text-tertiary">{formatAge(rev.createdAt)}</span>
             </button>
-            {isOpen && revPods.length > 0 && (
+            <Collapse open={isOpen} mountLazily id={disclosurePanelId(panelBase, rev.number)}>
               <div className="space-y-0.5 border-t border-theme-border/50 px-2 py-1.5 pl-8">
                 {revPods.map((pod) => (
                   <div key={pod.name} className="flex items-center gap-2 py-0.5 text-xs">
@@ -107,7 +114,7 @@ export function ReplicaSetProgression({ revisions, pods, namespace, onNavigate }
                   </div>
                 ))}
               </div>
-            )}
+            </Collapse>
           </div>
         )
       })}

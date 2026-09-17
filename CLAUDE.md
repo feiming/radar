@@ -275,6 +275,7 @@ Centralized `@layer components` classes in `theme/components.css` (Tailwind util
 - Buttons: `.btn-brand` — not hand-rolled `bg-blue-*`
 - Badges: `<Badge severity="...">` or `<Badge kind="...">` — never hand-write color strings
 - Shadows: `shadow-theme-sm/md/lg` — not raw Tailwind shadows
+- Motion: `<Collapse>` / `<CollapseChevron>` / `useDisclosure` for anything that expands in place; `useAnimatedUnmount(open, overlayExitMs(kind))` + `overlayTransitionStyle` for menus, dialogs, sheets. All timing comes from `packages/k8s-ui/src/utils/animation.ts` — never an inline duration or curve, never `open && (...)` for a disclosure, no native `<details>`. See DESIGN.md §7 Motion.
 
 ### Printer columns (uncurated CRDs)
 
