@@ -1893,8 +1893,31 @@ export interface CloudInstallFailure {
   retrySafe: boolean
 }
 
+// What Radar did before it stopped: the operation it planned, how far it got,
+// and what it could establish about the cluster. Evidence for the card, and
+// the input to the exit it offers — the two are decided separately.
+export interface CloudInstallAttempted {
+  mode: 'fresh' | 'adopt' | 'gitops'
+  namespace: string
+  release: string
+  stage: 'inspect' | 'prepare' | 'preflight'
+  // Discovery saw only the default namespace; a fresh plan is not proof that
+  // no Radar exists elsewhere.
+  partialScan?: boolean
+  // A complete scan found no Radar running, but Helm's release records could
+  // not be read, so a leftover release cannot be ruled out.
+  releaseUnread?: boolean
+  // GitOps only: the Hub install-page tab of the verified owning controller.
+  method?: 'argocd' | 'flux' | ''
+}
+
 export interface CloudInstallBlocked {
   reason: 'gitops' | 'preflight' | 'unsupported'
+  // Preflight only: what would unblock it, and the Helm operation that was
+  // dry-run — the plan card never renders when preflight blocks, so the
+  // blocked card states what Radar tried itself.
+  cause?: 'permissions' | 'cluster' | 'verification'
+  attempted?: CloudInstallAttempted
   message: string
   blocking?: string[]
 }

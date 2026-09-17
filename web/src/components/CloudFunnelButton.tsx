@@ -7,6 +7,7 @@ import { Tooltip } from './ui/Tooltip'
 import { CloudConnectFlow } from './CloudConnectFlow'
 import {
   type Handoff,
+  exitFor,
   handoffForBlocked,
   handoffForPrepareError,
   isHandoffOutcome,
@@ -111,9 +112,10 @@ export function CloudFunnelButton() {
   const lane = capabilities.data?.cloudConnect?.lane ?? 'wizard'
   const appUrl = capabilities.data?.cloudConnect?.appUrl || FALLBACK_APP_URL
   // utm_content names the link that was clicked. It travels only in the link
-  // the user opens; Radar sends nothing on its own.
-  const signupUrlFor = (content: string, outcome?: Handoff | null) => buildSignupUrl(appUrl, content, outcome)
-  const signupUrl = signupUrlFor('wizard-signup-button')
+  // the user opens; Radar sends nothing on its own. Only the blocked card may
+  // deep-link the install page (see exitFor); the pitch buttons and the
+  // footer link go to signup.
+  const signupUrl = buildSignupUrl(appUrl, 'wizard-signup-button')
 
   // Only while the dialog is open — never on the capabilities poll. The Hub
   // learns that someone opened it, which is congruent with what the dialog is
@@ -203,14 +205,14 @@ export function CloudFunnelButton() {
   // later. Leaving a live plan is the user canceling it, not a failure. Only
   // a connected flow, or no flow at all, leaves nothing to carry.
   const outcomeOf = (st: CloudInstallStatus): Handoff | null => {
-    if (blocked) return handoffForBlocked(blocked.reason)
+    if (blocked) return handoffForBlocked(blocked.reason, blocked.attempted)
     if (st.state === 'failed') {
       return {
         outcome: isHandoffOutcome(st.failure?.kind) ? st.failure.kind : 'failure_kind_unknown',
         retryable: st.failure?.retrySafe ?? false,
       }
     }
-    if (st.state === 'blocked' && st.blocked) return handoffForBlocked(st.blocked.reason)
+    if (st.state === 'blocked' && st.blocked) return handoffForBlocked(st.blocked.reason, st.blocked.attempted)
     if (st.state === 'connected' || st.state === 'idle') return null
     return { outcome: 'install_plan_canceled', retryable: false }
   }
@@ -304,7 +306,7 @@ export function CloudFunnelButton() {
             <CloudConnectFlow
               status={flowForView}
               blocked={blocked}
-              signupUrl={signupUrlFor('driver-blocked-card-browser-link', outcomeOf(flowForView))}
+              exit={exitFor(appUrl, 'driver-blocked-card-browser-link', outcomeOf(flowForView))}
               onStatus={applyStatus}
               onExit={() => exitFlow(outcomeOf(flowForView))}
             />
@@ -319,8 +321,10 @@ export function CloudFunnelButton() {
               signupUrl={signupUrl}
               // One link name whether or not an attempt preceded the click; the
               // outcome, when present, is what says an attempt happened.
-              driverBrowserUrl={signupUrlFor('driver-footer-browser-link', handoff)}
+              driverBrowserUrl={buildSignupUrl(appUrl, 'driver-footer-browser-link', handoff)}
               prepareFailed={prepareFailed}
+              // A prepare error's reason, kept on the pitch after its toast is gone.
+              prepareError={handoff?.detail}
               assurances={connectInfo.data?.assurances}
               notice={connectInfo.data?.notice}
               self={inCluster ? self.data : undefined}
@@ -374,6 +378,7 @@ function ModalFooter({
   signupUrl,
   driverBrowserUrl,
   prepareFailed,
+  prepareError,
   assurances,
   notice,
   self,
@@ -387,6 +392,7 @@ function ModalFooter({
   // an in-app attempt when one preceded this render.
   driverBrowserUrl: string
   prepareFailed: boolean
+  prepareError?: string
   // Live copy from the Hub; undefined until (or unless) it arrives.
   assurances?: string[]
   notice?: string
@@ -489,6 +495,15 @@ function ModalFooter({
           Maybe later
         </button>
       </div>
+      {/* The last attempt's stop, when Radar could not even inspect the
+          cluster: the toast that first said so is gone in seconds, and "Try
+          again" alone does not say what to try again for. The footer link
+          above is the way around it. */}
+      {lane === 'driver' && prepareError && (
+        <p className="mt-2.5 text-[11.5px] leading-relaxed text-amber-600 dark:text-amber-400">
+          Radar couldn’t inspect this cluster: {prepareError}
+        </p>
+      )}
       {/* Mechanics, not marketing: a falsifiable claim the plan card then
           fulfills. Sits next to the button whose click it de-risks. */}
       {lane === 'driver' && (
