@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -34,8 +35,6 @@ var shellEnvVars = []string{
 	"RADAR_HUB_APP_URL",
 }
 
-// shellEnvPrefixes lists env var prefixes to capture wholesale. All vars
-// matching any prefix are forwarded to the desktop app's environment.
 var shellEnvPrefixes = []string{
 	"ANTHROPIC_",
 	"CLAUDE_CODE_",
@@ -46,6 +45,7 @@ var shellEnvPrefixes = []string{
 // set in .zshrc/.bashrc but not available to macOS .app bundles or
 // Linux desktop applications.
 func enrichEnv() {
+	originalKubeconfig := os.Getenv("KUBECONFIG")
 	captured := getShellEnv(shellEnvVars, shellEnvPrefixes)
 
 	if path, ok := captured["PATH"]; ok && path != "" {
@@ -63,8 +63,6 @@ func enrichEnv() {
 		}
 	}
 
-	// Apply all captured vars (except PATH, handled above) that are not
-	// already set in the process environment.
 	for key, val := range captured {
 		if key == "PATH" {
 			continue
@@ -84,9 +82,8 @@ func enrichEnv() {
 	// the errorlog so it shows up in bug report diagnostics.
 	kubeconfigVal, kubeconfigFound := captured["KUBECONFIG"]
 	switch {
-	case os.Getenv("KUBECONFIG") != "" && !(kubeconfigFound && kubeconfigVal != ""):
-		existing := os.Getenv("KUBECONFIG")
-		pathCount := len(filepath.SplitList(existing))
+	case originalKubeconfig != "" && kubeconfigFound && kubeconfigVal != "":
+		pathCount := len(filepath.SplitList(originalKubeconfig))
 		log.Printf("KUBECONFIG enrichment skipped: already set in process env (%d path(s))", pathCount)
 		errorlog.Record("env-enrich", "warning",
 			"KUBECONFIG enrichment skipped: already set in process env with %d path(s); "+
@@ -107,8 +104,11 @@ func enrichEnv() {
 // It uses -i (interactive) so that zsh reads ~/.zshrc, where tools like
 // Homebrew's google-cloud-sdk add their PATH/KUBECONFIG entries. Without -i,
 // a non-interactive login shell skips ~/.zshrc.
-// Output is KEY=VALUE lines between markers; prefix entries capture all
-// matching vars wholesale (e.g. "ANTHROPIC_" captures every ANTHROPIC_* var).
+//
+// The full, unfiltered shell environment is captured and then matched against
+// keys/prefixes in Go rather than filtered via shell grep: a filtered `env`
+// stream can't be split back into records by newline alone once a matching
+// value itself contains a newline, so filtering has to happen after parsing.
 func getShellEnv(keys []string, prefixes []string) map[string]string {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
@@ -119,20 +119,10 @@ func getShellEnv(keys []string, prefixes []string) map[string]string {
 		}
 	}
 
-	// Build a grep -E pattern matching exact keys (KEY=) and prefix wildcards.
-	var patterns []string
-	for _, k := range keys {
-		patterns = append(patterns, k+"=")
-	}
-	for _, p := range prefixes {
-		patterns = append(patterns, p)
-	}
-	grepPattern := "^(" + strings.Join(patterns, "|") + ")"
-
 	const startMarker = "__RADAR_ENV_START__"
 	const endMarker = "__RADAR_ENV_END__"
 
-	echoCmd := "echo " + startMarker + "; env | grep -E '" + grepPattern + "'; echo " + endMarker
+	echoCmd := "echo " + startMarker + "; env; echo " + endMarker
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -159,16 +149,62 @@ func getShellEnv(keys []string, prefixes []string) map[string]string {
 	}
 
 	payload := output[startIdx+len(startMarker) : endIdx]
+	all := parseEnvOutput(payload)
+
 	result := make(map[string]string)
-	for _, line := range strings.Split(payload, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	keySet := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		keySet[k] = true
+	}
+	for key, val := range all {
+		if keySet[key] {
+			result[key] = val
 			continue
 		}
-		if idx := strings.IndexByte(line, '='); idx >= 0 {
-			result[line[:idx]] = line[idx+1:]
+		for _, p := range prefixes {
+			if strings.HasPrefix(key, p) {
+				result[key] = val
+				break
+			}
 		}
 	}
+	return result
+}
+
+// envVarStart matches the start of a new KEY=VALUE record in `env` output.
+// A line that doesn't match is a continuation of the previous record's
+// (multiline) value.
+var envVarStart = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// parseEnvOutput parses `env`-style output into a key/value map, preserving
+// values that span multiple lines.
+func parseEnvOutput(payload string) map[string]string {
+	payload = strings.Trim(payload, "\n")
+	if payload == "" {
+		return nil
+	}
+
+	result := make(map[string]string)
+	var key string
+	var val strings.Builder
+	flush := func() {
+		if key != "" {
+			result[key] = val.String()
+		}
+	}
+	for _, line := range strings.Split(payload, "\n") {
+		if loc := envVarStart.FindStringIndex(line); loc != nil {
+			flush()
+			eq := strings.IndexByte(line, '=')
+			key = line[:eq]
+			val.Reset()
+			val.WriteString(line[eq+1:])
+		} else if key != "" {
+			val.WriteByte('\n')
+			val.WriteString(line)
+		}
+	}
+	flush()
 	return result
 }
 
