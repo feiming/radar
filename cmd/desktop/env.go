@@ -100,15 +100,25 @@ func enrichEnv() {
 	}
 }
 
+// envRecordStart matches the start of a KEY=VALUE record in `env` output,
+// used only to discover candidate variable *names* — never to extract
+// values. `env` output isn't safe to split into records by newline: a
+// multiline value has continuation lines that don't match, and bash's
+// exported-function entries (`BASH_FUNC_name%%=() { ... }`) don't match
+// either, so treating non-matching lines as continuations would glom a
+// function body onto whatever real variable preceded it.
+var envRecordStart = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
 // getShellEnv runs the user's login shell to capture environment variables.
 // It uses -i (interactive) so that zsh reads ~/.zshrc, where tools like
 // Homebrew's google-cloud-sdk add their PATH/KUBECONFIG entries. Without -i,
 // a non-interactive login shell skips ~/.zshrc.
 //
-// The full, unfiltered shell environment is captured and then matched against
-// keys/prefixes in Go rather than filtered via shell grep: a filtered `env`
-// stream can't be split back into records by newline alone once a matching
-// value itself contains a newline, so filtering has to happen after parsing.
+// Values are never read off the raw `env` dump: an exact key or a
+// prefix-matched name discovered there is instead fetched in a second pass
+// by asking the shell to print it directly, framed with control-byte
+// separators a real path/URL/API-key value won't contain, so a value that
+// spans multiple lines can't be mis-split or bleed into another variable.
 func getShellEnv(keys []string, prefixes []string) map[string]string {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
@@ -119,15 +129,71 @@ func getShellEnv(keys []string, prefixes []string) map[string]string {
 		}
 	}
 
+	raw := runLoginShell(shell, "env")
+	if raw == "" {
+		return nil
+	}
+
+	names := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		names[k] = true
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		if !envRecordStart.MatchString(line) {
+			continue
+		}
+		key := line[:strings.IndexByte(line, '=')]
+		for _, p := range prefixes {
+			if strings.HasPrefix(key, p) {
+				names[key] = true
+				break
+			}
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+
+	const nameValueSep = "\x01"
+	const recordSep = "\x02"
+
+	var script strings.Builder
+	for name := range names {
+		script.WriteString("printf '%s\\001%s\\002' " + name + " \"$" + name + "\"\n")
+	}
+
+	payload := runLoginShell(shell, script.String())
+	if payload == "" {
+		return nil
+	}
+	// runLoginShell's markers are separated from the payload by the
+	// newlines `echo` itself prints, which would otherwise land inside the
+	// first record's name — trim them before splitting on the byte-level
+	// record separator.
+	payload = strings.Trim(payload, "\n")
+
+	result := make(map[string]string, len(names))
+	for _, record := range strings.Split(payload, recordSep) {
+		idx := strings.IndexByte(record, nameValueSep[0])
+		if idx < 0 {
+			continue
+		}
+		result[record[:idx]] = record[idx+1:]
+	}
+	return result
+}
+
+// runLoginShell runs script in an interactive login shell and returns the
+// output it printed between two unique markers, so any prompt/motd/rc-file
+// chatter around it is discarded.
+func runLoginShell(shell, script string) string {
 	const startMarker = "__RADAR_ENV_START__"
 	const endMarker = "__RADAR_ENV_END__"
-
-	echoCmd := "echo " + startMarker + "; env; echo " + endMarker
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, shell, "-l", "-i", "-c", echoCmd)
+	cmd := exec.CommandContext(ctx, shell, "-l", "-i", "-c", "echo "+startMarker+"\n"+script+"\necho "+endMarker)
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
 		"USER=" + os.Getenv("USER"),
@@ -137,7 +203,7 @@ func getShellEnv(keys []string, prefixes []string) map[string]string {
 	out, err := cmd.Output()
 	if err != nil {
 		log.Printf("Shell env detection failed (%s -l -i -c): %v", shell, err)
-		return nil
+		return ""
 	}
 
 	output := string(out)
@@ -145,67 +211,9 @@ func getShellEnv(keys []string, prefixes []string) map[string]string {
 	endIdx := strings.Index(output, endMarker)
 	if startIdx == -1 || endIdx == -1 || endIdx <= startIdx {
 		log.Printf("Shell env detection: markers not found in output")
-		return nil
+		return ""
 	}
-
-	payload := output[startIdx+len(startMarker) : endIdx]
-	all := parseEnvOutput(payload)
-
-	result := make(map[string]string)
-	keySet := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		keySet[k] = true
-	}
-	for key, val := range all {
-		if keySet[key] {
-			result[key] = val
-			continue
-		}
-		for _, p := range prefixes {
-			if strings.HasPrefix(key, p) {
-				result[key] = val
-				break
-			}
-		}
-	}
-	return result
-}
-
-// envVarStart matches the start of a new KEY=VALUE record in `env` output.
-// A line that doesn't match is a continuation of the previous record's
-// (multiline) value.
-var envVarStart = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
-
-// parseEnvOutput parses `env`-style output into a key/value map, preserving
-// values that span multiple lines.
-func parseEnvOutput(payload string) map[string]string {
-	payload = strings.Trim(payload, "\n")
-	if payload == "" {
-		return nil
-	}
-
-	result := make(map[string]string)
-	var key string
-	var val strings.Builder
-	flush := func() {
-		if key != "" {
-			result[key] = val.String()
-		}
-	}
-	for _, line := range strings.Split(payload, "\n") {
-		if loc := envVarStart.FindStringIndex(line); loc != nil {
-			flush()
-			eq := strings.IndexByte(line, '=')
-			key = line[:eq]
-			val.Reset()
-			val.WriteString(line[eq+1:])
-		} else if key != "" {
-			val.WriteByte('\n')
-			val.WriteString(line)
-		}
-	}
-	flush()
-	return result
+	return output[startIdx+len(startMarker) : endIdx]
 }
 
 // commonPaths returns well-known directories where CLI tools are typically installed.
